@@ -15,12 +15,12 @@ permissions:
   pull-requests: write
 
 env:
-  # Required when the CLI token can access multiple orgs; without this the
-  # scanner posts an empty "aligned" comment and skips real cost/policy results.
+  # Required when the CLI token can access multiple orgs.
   INFRACOST_CLI_ORG: infracost-test-32biu
 
 jobs:
   infracost-diff:
+    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - name: Get PR details
@@ -41,23 +41,102 @@ jobs:
           echo "pr-number=${PR_NUMBER}" >> $GITHUB_OUTPUT
 
       - name: Checkout base branch
-        if: github.event.action != 'closed'
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.pr.outputs.base-ref }}
           path: base
 
       - name: Checkout head branch
-        if: github.event.action != 'closed'
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.pr.outputs.head-ref }}
           path: head
 
+      # Official scanner updates Infracost Cloud. It may still post a short
+      # FinOps "aligned" comment; the CLI step below posts the cost table.
       - name: Run Infracost Diff
+        continue-on-error: true
         uses: infracost/actions/diff@c2e668fda0716ccc96353c6e6438c4a20448821a
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
-          base-path: ${{ github.event.action != 'closed' && 'base' || '' }}
-          head-path: ${{ github.event.action != 'closed' && 'head' || '' }}
+          base-path: base
+          head-path: head
           pr-number: ${{ steps.pr.outputs.pr-number }}
+
+      - name: Install Infracost CLI
+        run: curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+
+      - name: Post cost breakdown comment
+        env:
+          INFRACOST_CLI_AUTHENTICATION_TOKEN: ${{ secrets.INFRACOST_API_KEY }}
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+          INFRACOST_CLI_ORG: infracost-test-32biu
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        run: |
+          set -euo pipefail
+
+          infracost scan base
+          BASE_JSON=$(infracost inspect --summary --json)
+          BASE_COST=$(echo "$BASE_JSON" | jq -r '.monthly_cost')
+          BASE_FAIL=$(echo "$BASE_JSON" | jq -r '.failing_policies')
+
+          infracost scan head
+          HEAD_JSON=$(infracost inspect --summary --json)
+          HEAD_COST=$(echo "$HEAD_JSON" | jq -r '.monthly_cost')
+          HEAD_FAIL=$(echo "$HEAD_JSON" | jq -r '.failing_policies')
+          HEAD_RESOURCES=$(echo "$HEAD_JSON" | jq -r '.costed_resources')
+          CURRENCY=$(echo "$HEAD_JSON" | jq -r '.currency // "USD"')
+          infracost inspect --top 8 --fields type,count,monthly_cost > /tmp/infracost-top.txt
+
+          python3 - "$BASE_COST" "$HEAD_COST" "$BASE_FAIL" "$HEAD_FAIL" "$HEAD_RESOURCES" "$CURRENCY" <<'PY' > /tmp/infracost-comment.md
+          import sys
+          base, head = float(sys.argv[1]), float(sys.argv[2])
+          base_fail, head_fail = sys.argv[3], sys.argv[4]
+          resources, currency = sys.argv[5], sys.argv[6]
+          delta = head - base
+          pct = "n/a" if base == 0 else f"{(delta / base) * 100:.0f}%"
+          if delta > 0:
+              sign, emoji = "increase", "📈"
+          elif delta < 0:
+              sign, emoji = "decrease", "📉"
+          else:
+              sign, emoji = "no change", "➖"
+          top = open("/tmp/infracost-top.txt").read().rstrip()
+          print(f"""### 💰 Infracost report
+
+          **Monthly cost will {sign} by ${abs(delta):,.2f} {emoji}**
+
+          | | |
+          |---|---|
+          | Baseline (base branch) | ${base:,.2f} |
+          | This PR | ${head:,.2f} |
+          | Change | ${delta:+,.2f} ({pct}) |
+          | Costed resources | {resources} |
+          | Failing FinOps policies | {head_fail} (was {base_fail}) |
+          | Currency | {currency} |
+
+          <details>
+          <summary><strong>Cost details</strong></summary>
+
+          ```
+          {top}
+          ```
+
+          </details>
+
+          <sub>Posted by Infracost CLI in GitHub Actions. Official Cloud scanner also ran on this PR.</sub>
+          """)
+          PY
+
+          # Strip leading indentation from the generated markdown
+          sed -i 's/^          //' /tmp/infracost-comment.md
+
+          EXISTING=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --jq '.[] | select(.body | contains("Posted by Infracost CLI in GitHub Actions")) | .id' | head -1 || true)
+          if [ -n "${EXISTING}" ]; then
+            jq -n --rawfile body /tmp/infracost-comment.md '{body: $body}' \
+              | gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING}" --input -
+          else
+            gh pr comment "${PR_NUMBER}" --body-file /tmp/infracost-comment.md
+          fi
