@@ -76,18 +76,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          infracost scan ./base
-          BASE_JSON=$(infracost inspect ./base --summary --json)
-          BASE_COST=$(echo "$BASE_JSON" | jq -r '.monthly_cost')
-          BASE_FAIL=$(echo "$BASE_JSON" | jq -r '.failing_policies')
+          (
+            cd base
+            infracost scan .
+            infracost inspect --summary --json > /tmp/base.json
+          )
+          (
+            cd head
+            infracost scan .
+            infracost inspect --summary --json > /tmp/head.json
+            infracost inspect --top 8 --fields type,count,monthly_cost > /tmp/infracost-top.txt
+          )
 
-          infracost scan ./head
-          HEAD_JSON=$(infracost inspect ./head --summary --json)
-          HEAD_COST=$(echo "$HEAD_JSON" | jq -r '.monthly_cost')
-          HEAD_FAIL=$(echo "$HEAD_JSON" | jq -r '.failing_policies')
-          HEAD_RESOURCES=$(echo "$HEAD_JSON" | jq -r '.costed_resources')
-          CURRENCY=$(echo "$HEAD_JSON" | jq -r '.currency // "USD"')
-          infracost inspect ./head --top 8 --fields type,count,monthly_cost > /tmp/infracost-top.txt
+          BASE_COST=$(jq -r '.monthly_cost' /tmp/base.json)
+          BASE_FAIL=$(jq -r '.failing_policies' /tmp/base.json)
+          HEAD_COST=$(jq -r '.monthly_cost' /tmp/head.json)
+          HEAD_FAIL=$(jq -r '.failing_policies' /tmp/head.json)
+          HEAD_RESOURCES=$(jq -r '.costed_resources' /tmp/head.json)
+          CURRENCY=$(jq -r '.currency // "USD"' /tmp/head.json)
 
           python3 - "$BASE_COST" "$HEAD_COST" "$BASE_FAIL" "$HEAD_FAIL" "$HEAD_RESOURCES" "$CURRENCY" <<'PY' > /tmp/infracost-comment.md
           import sys
