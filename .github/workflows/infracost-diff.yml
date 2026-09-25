@@ -14,6 +14,11 @@ permissions:
   contents: read
   pull-requests: write
 
+env:
+  # Required when the CLI token can access multiple orgs; without this the
+  # scanner posts an empty "aligned" comment and skips real cost/policy results.
+  INFRACOST_CLI_ORG: infracost-test-32biu
+
 jobs:
   infracost-diff:
     runs-on: ubuntu-latest

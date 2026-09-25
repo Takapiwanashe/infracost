@@ -140,10 +140,17 @@ data "aws_ami" "amazon_linux" {
 
 resource "aws_instance" "web_server" {
   ami                    = data.aws_ami.amazon_linux.id
-  # Bumped for Infracost PR cost-diff demo (was t3.micro)
-  instance_type          = "t3.large"
+  # Infracost demo: large jump vs main (t3.large) so PR comment shows $ delta
+  instance_type          = "m5.4xlarge"
   subnet_id              = aws_subnet.public_1.id
   vpc_security_group_ids = [aws_security_group.web_sg.id]
+
+  ebs_block_device {
+    device_name = "/dev/sdf"
+    volume_type = "io1"
+    volume_size = 3000
+    iops        = 1500
+  }
 
   user_data = <<-EOF
               #!/bin/bash
@@ -158,8 +165,8 @@ resource "aws_instance" "web_server" {
 
 resource "aws_instance" "app_server" {
   ami                    = data.aws_ami.amazon_linux.id
-  # Bumped for Infracost PR cost-diff demo (was t3.micro)
-  instance_type          = "t3.medium"
+  # Infracost demo: bump vs main (t3.medium)
+  instance_type          = "m5.2xlarge"
   subnet_id              = aws_subnet.private_app_1.id
   vpc_security_group_ids = [aws_security_group.app_sg.id]
 
@@ -180,8 +187,8 @@ resource "aws_db_instance" "database" {
   allocated_storage      = 20
   engine                 = "mysql"
   engine_version         = "8.0"
-  # Bumped for Infracost PR cost-diff demo (was db.t3.micro)
-  instance_class         = "db.t3.small"
+  # Infracost demo: bump vs main (db.t3.small)
+  instance_class         = "db.m5.large"
   db_name                = "webappdb"
   username               = "adminuser"
   password               = var.db_password # Fixed: Uses a secure variable input
