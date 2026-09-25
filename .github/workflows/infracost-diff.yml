@@ -76,18 +76,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          infracost scan base
-          BASE_JSON=$(infracost inspect --summary --json)
+          infracost scan ./base
+          BASE_JSON=$(infracost inspect ./base --summary --json)
           BASE_COST=$(echo "$BASE_JSON" | jq -r '.monthly_cost')
           BASE_FAIL=$(echo "$BASE_JSON" | jq -r '.failing_policies')
 
-          infracost scan head
-          HEAD_JSON=$(infracost inspect --summary --json)
+          infracost scan ./head
+          HEAD_JSON=$(infracost inspect ./head --summary --json)
           HEAD_COST=$(echo "$HEAD_JSON" | jq -r '.monthly_cost')
           HEAD_FAIL=$(echo "$HEAD_JSON" | jq -r '.failing_policies')
           HEAD_RESOURCES=$(echo "$HEAD_JSON" | jq -r '.costed_resources')
           CURRENCY=$(echo "$HEAD_JSON" | jq -r '.currency // "USD"')
-          infracost inspect --top 8 --fields type,count,monthly_cost > /tmp/infracost-top.txt
+          infracost inspect ./head --top 8 --fields type,count,monthly_cost > /tmp/infracost-top.txt
 
           python3 - "$BASE_COST" "$HEAD_COST" "$BASE_FAIL" "$HEAD_FAIL" "$HEAD_RESOURCES" "$CURRENCY" <<'PY' > /tmp/infracost-comment.md
           import sys
@@ -129,7 +129,6 @@ jobs:
           """)
           PY
 
-          # Strip leading indentation from the generated markdown
           sed -i 's/^          //' /tmp/infracost-comment.md
 
           EXISTING=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
