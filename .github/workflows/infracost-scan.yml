@@ -7,6 +7,9 @@ on:
 permissions:
   contents: read
 
+env:
+  INFRACOST_CLI_ORG: infracost-test-32biu
+
 jobs:
   infracost-scan:
     runs-on: ubuntu-latest

@@ -140,10 +140,17 @@ data "aws_ami" "amazon_linux" {
 
 resource "aws_instance" "web_server" {
   ami                    = data.aws_ami.amazon_linux.id
-  # Bumped for Infracost PR cost-diff demo (was t3.micro)
-  instance_type          = "t3.large"
+  # Infracost demo: large jump vs main (t3.large) so PR comment shows $ delta
+  instance_type          = "m5.4xlarge"
   subnet_id              = aws_subnet.public_1.id
   vpc_security_group_ids = [aws_security_group.web_sg.id]
+
+  ebs_block_device {
+    device_name = "/dev/sdf"
+    volume_type = "io1"
+    volume_size = 3000
+    iops        = 1500
+  }
 
   user_data = <<-EOF
               #!/bin/bash
@@ -158,12 +165,82 @@ resource "aws_instance" "web_server" {
 
 resource "aws_instance" "app_server" {
   ami                    = data.aws_ami.amazon_linux.id
-  # Bumped for Infracost PR cost-diff demo (was t3.micro)
-  instance_type          = "t3.medium"
+  # Infracost demo: bump vs main (t3.medium)
+  instance_type          = "m5.2xlarge"
   subnet_id              = aws_subnet.private_app_1.id
   vpc_security_group_ids = [aws_security_group.app_sg.id]
 
   tags = { Name = "3tier-app-server" }
+}
+
+# ==============================================================================
+# 3b. EXTRA COSTED RESOURCES (Infracost PR summary demo)
+# ==============================================================================
+
+resource "aws_eip" "nat" {
+  domain = "vpc"
+  tags   = { Name = "3tier-nat-eip" }
+}
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public_1.id
+  tags          = { Name = "3tier-nat" }
+}
+
+resource "aws_subnet" "public_2" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.5.0/24"
+  availability_zone       = "af-south-1b"
+  map_public_ip_on_launch = true
+  tags                    = { Name = "pub-subnet-2" }
+}
+
+resource "aws_route_table_association" "public_2_assoc" {
+  subnet_id      = aws_subnet.public_2.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+resource "aws_lb" "web" {
+  name               = "3tier-web-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.web_sg.id]
+  subnets            = [aws_subnet.public_1.id, aws_subnet.public_2.id]
+  tags               = { Name = "3tier-web-alb" }
+}
+
+resource "aws_elasticache_subnet_group" "redis" {
+  name       = "3tier-redis-subnets"
+  subnet_ids = [aws_subnet.private_app_1.id, aws_subnet.private_db_2.id]
+}
+
+resource "aws_elasticache_cluster" "redis" {
+  cluster_id           = "3tier-redis"
+  engine               = "redis"
+  node_type            = "cache.m5.large"
+  num_cache_nodes      = 1
+  parameter_group_name = "default.redis7"
+  port                 = 6379
+  subnet_group_name    = aws_elasticache_subnet_group.redis.name
+  security_group_ids   = [aws_security_group.app_sg.id]
+}
+
+resource "aws_ebs_volume" "app_data" {
+  availability_zone = "af-south-1a"
+  size              = 500
+  type              = "gp3"
+  iops              = 3000
+  throughput        = 250
+  tags              = { Name = "3tier-app-data" }
+}
+
+resource "aws_instance" "worker" {
+  ami                    = data.aws_ami.amazon_linux.id
+  instance_type          = "m5.xlarge"
+  subnet_id              = aws_subnet.private_app_1.id
+  vpc_security_group_ids = [aws_security_group.app_sg.id]
+  tags                   = { Name = "3tier-worker" }
 }
 
 # ==============================================================================
@@ -180,8 +257,8 @@ resource "aws_db_instance" "database" {
   allocated_storage      = 20
   engine                 = "mysql"
   engine_version         = "8.0"
-  # Bumped for Infracost PR cost-diff demo (was db.t3.micro)
-  instance_class         = "db.t3.small"
+  # Infracost demo: bump vs main (db.t3.small)
+  instance_class         = "db.m5.large"
   db_name                = "webappdb"
   username               = "adminuser"
   password               = var.db_password # Fixed: Uses a secure variable input
