@@ -1,0 +1,51 @@
+# Infracost PR cost comments + dashboard updates.
+# Requires repo secret: INFRACOST_API_KEY
+# Docs: https://github.com/infracost/actions
+
+name: Infracost
+
+on:
+  pull_request:
+    types: [opened, synchronize, closed, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # Cost diff + PR comment on pull requests
+  diff:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      # Skipped on closed PRs — the diff action only updates dashboard status then.
+      - uses: actions/checkout@v4
+        if: github.event.action != 'closed'
+        with:
+          path: head
+
+      - uses: actions/checkout@v4
+        if: github.event.action != 'closed'
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          path: base
+
+      - uses: infracost/actions/diff@v4
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+          base-path: base
+          head-path: head
+
+  # Keep Infracost dashboard baseline updated on main
+  scan:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: infracost/actions/scan@v4
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+          path: .
