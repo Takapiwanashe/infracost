@@ -120,11 +120,13 @@ jobs:
           sed -i 's/^          //' /tmp/infracost-comment.md
           cat /tmp/infracost-comment.md
 
+          # Use the API (not `gh pr comment`) — workspace root is not a git checkout.
           EXISTING=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             --jq '.[] | select(.body | contains("Posted by Infracost CLI in GitHub Actions")) | .id' | head -1 || true)
           if [ -n "${EXISTING}" ]; then
             jq -n --rawfile body /tmp/infracost-comment.md '{body: $body}' \
               | gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING}" --input -
           else
-            gh pr comment "${PR_NUMBER}" --body-file /tmp/infracost-comment.md
+            jq -n --rawfile body /tmp/infracost-comment.md '{body: $body}' \
+              | gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --input -
           fi
