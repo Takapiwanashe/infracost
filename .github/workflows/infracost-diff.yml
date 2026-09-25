@@ -64,7 +64,7 @@ jobs:
           pr-number: ${{ steps.pr.outputs.pr-number }}
 
       - name: Install Infracost CLI
-        run: curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+        run: curl -fsSL https://raw.githubusercontent.com/infracost/cli/master/scripts/install.sh | sh
 
       - name: Post cost breakdown comment
         env:
