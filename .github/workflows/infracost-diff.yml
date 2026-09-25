@@ -76,23 +76,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          (
-            cd base
-            infracost scan .
-            infracost inspect --summary --json > /tmp/base.json
-          )
-          (
-            cd head
-            infracost scan .
-            infracost inspect --summary --json > /tmp/head.json
-            infracost inspect --top 8 --fields type,count,monthly_cost > /tmp/infracost-top.txt
-          )
+          # Use scan --json (inspect needs a git root that GHA path checkouts break)
+          infracost scan ./base --json > /tmp/base.json
+          infracost scan ./head --json > /tmp/head.json
 
-          BASE_COST=$(jq -r '.monthly_cost' /tmp/base.json)
-          BASE_FAIL=$(jq -r '.failing_policies' /tmp/base.json)
-          HEAD_COST=$(jq -r '.monthly_cost' /tmp/head.json)
-          HEAD_FAIL=$(jq -r '.failing_policies' /tmp/head.json)
-          HEAD_RESOURCES=$(jq -r '.costed_resources' /tmp/head.json)
+          BASE_COST=$(jq -r '.summary.total_monthly_cost' /tmp/base.json)
+          BASE_FAIL=$(jq -r '.summary.failing_finops_policies' /tmp/base.json)
+          HEAD_COST=$(jq -r '.summary.total_monthly_cost' /tmp/head.json)
+          HEAD_FAIL=$(jq -r '.summary.failing_finops_policies' /tmp/head.json)
+          HEAD_RESOURCES=$(jq -r '.summary.costed_resources' /tmp/head.json)
           CURRENCY=$(jq -r '.currency // "USD"' /tmp/head.json)
 
           python3 - "$BASE_COST" "$HEAD_COST" "$BASE_FAIL" "$HEAD_FAIL" "$HEAD_RESOURCES" "$CURRENCY" <<'PY' > /tmp/infracost-comment.md
@@ -108,7 +100,6 @@ jobs:
               sign, emoji = "decrease", "📉"
           else:
               sign, emoji = "no change", "➖"
-          top = open("/tmp/infracost-top.txt").read().rstrip()
           print(f"""### 💰 Infracost report
 
           **Monthly cost will {sign} by ${abs(delta):,.2f} {emoji}**
@@ -122,20 +113,12 @@ jobs:
           | Failing FinOps policies | {head_fail} (was {base_fail}) |
           | Currency | {currency} |
 
-          <details>
-          <summary><strong>Cost details</strong></summary>
-
-          ```
-          {top}
-          ```
-
-          </details>
-
           <sub>Posted by Infracost CLI in GitHub Actions. Official Cloud scanner also ran on this PR.</sub>
           """)
           PY
 
           sed -i 's/^          //' /tmp/infracost-comment.md
+          cat /tmp/infracost-comment.md
 
           EXISTING=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             --jq '.[] | select(.body | contains("Posted by Infracost CLI in GitHub Actions")) | .id' | head -1 || true)
