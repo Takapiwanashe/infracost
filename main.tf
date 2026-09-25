@@ -140,7 +140,8 @@ data "aws_ami" "amazon_linux" {
 
 resource "aws_instance" "web_server" {
   ami                    = data.aws_ami.amazon_linux.id
-  instance_type          = "t3.micro"
+  # Bumped for Infracost PR cost-diff demo (was t3.micro)
+  instance_type          = "t3.large"
   subnet_id              = aws_subnet.public_1.id
   vpc_security_group_ids = [aws_security_group.web_sg.id]
 
@@ -157,7 +158,8 @@ resource "aws_instance" "web_server" {
 
 resource "aws_instance" "app_server" {
   ami                    = data.aws_ami.amazon_linux.id
-  instance_type          = "t3.micro"
+  # Bumped for Infracost PR cost-diff demo (was t3.micro)
+  instance_type          = "t3.medium"
   subnet_id              = aws_subnet.private_app_1.id
   vpc_security_group_ids = [aws_security_group.app_sg.id]
 
@@ -178,7 +180,8 @@ resource "aws_db_instance" "database" {
   allocated_storage      = 20
   engine                 = "mysql"
   engine_version         = "8.0"
-  instance_class         = "db.t3.micro"
+  # Bumped for Infracost PR cost-diff demo (was db.t3.micro)
+  instance_class         = "db.t3.small"
   db_name                = "webappdb"
   username               = "adminuser"
   password               = var.db_password # Fixed: Uses a secure variable input
