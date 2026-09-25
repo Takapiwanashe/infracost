@@ -53,7 +53,7 @@ jobs:
           path: head
 
       # Official scanner updates Infracost Cloud. It may still post a short
-      # FinOps "aligned" comment; the CLI step below posts the cost table.
+      # FinOps "aligned" comment; the CLI step below posts the full summary.
       - name: Run Infracost Diff
         continue-on-error: true
         uses: infracost/actions/diff@c2e668fda0716ccc96353c6e6438c4a20448821a
@@ -66,7 +66,7 @@ jobs:
       - name: Install Infracost CLI
         run: curl -fsSL https://raw.githubusercontent.com/infracost/cli/master/scripts/install.sh | sh
 
-      - name: Post cost breakdown comment
+      - name: Post scan summary comment
         env:
           INFRACOST_CLI_AUTHENTICATION_TOKEN: ${{ secrets.INFRACOST_API_KEY }}
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
@@ -76,51 +76,176 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Use scan --json (inspect needs a git root that GHA path checkouts break)
-          infracost scan ./base --json > /tmp/base.json
-          infracost scan ./head --json > /tmp/head.json
+          # inspect needs a usable git root inside each path checkout
+          ensure_git() {
+            local dir="$1"
+            if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+              git -C "$dir" init -q
+              git -C "$dir" -c user.email=ci@infracost.local -c user.name=ci add -A
+              git -C "$dir" -c user.email=ci@infracost.local -c user.name=ci commit -qm ci --allow-empty
+            fi
+          }
 
-          BASE_COST=$(jq -r '.summary.total_monthly_cost' /tmp/base.json)
-          BASE_FAIL=$(jq -r '.summary.failing_finops_policies' /tmp/base.json)
-          HEAD_COST=$(jq -r '.summary.total_monthly_cost' /tmp/head.json)
-          HEAD_FAIL=$(jq -r '.summary.failing_finops_policies' /tmp/head.json)
-          HEAD_RESOURCES=$(jq -r '.summary.costed_resources' /tmp/head.json)
-          CURRENCY=$(jq -r '.currency // "USD"' /tmp/head.json)
+          scan_tree() {
+            local dir="$1"
+            local prefix="$2"
+            ensure_git "$dir"
+            (
+              cd "$dir"
+              infracost scan . --json > "/tmp/${prefix}.json"
+              infracost inspect --top 10 --fields type,count,monthly_cost > "/tmp/${prefix}-top.txt" || true
+              infracost inspect --summary --json > "/tmp/${prefix}-summary.json" || cp "/tmp/${prefix}.json" "/tmp/${prefix}-summary.json"
+            )
+          }
 
-          python3 - "$BASE_COST" "$HEAD_COST" "$BASE_FAIL" "$HEAD_FAIL" "$HEAD_RESOURCES" "$CURRENCY" <<'PY' > /tmp/infracost-comment.md
-          import sys
-          base, head = float(sys.argv[1]), float(sys.argv[2])
-          base_fail, head_fail = sys.argv[3], sys.argv[4]
-          resources, currency = sys.argv[5], sys.argv[6]
-          delta = head - base
-          pct = "n/a" if base == 0 else f"{(delta / base) * 100:.0f}%"
+          scan_tree base base
+          scan_tree head head
+
+          python3 <<'PY' > /tmp/infracost-comment.md
+          import json
+          from pathlib import Path
+
+          def load_scan(prefix):
+              raw = json.loads(Path(f"/tmp/{prefix}.json").read_text())
+              summary = raw.get("summary") or {}
+              # Prefer inspect summary if present
+              sp = Path(f"/tmp/{prefix}-summary.json")
+              if sp.exists():
+                  try:
+                      s2 = json.loads(sp.read_text())
+                      if "monthly_cost" in s2:
+                          summary = {
+                              **summary,
+                              "total_monthly_cost": s2.get("monthly_cost", summary.get("total_monthly_cost")),
+                              "resources": s2.get("resources", summary.get("resources")),
+                              "costed_resources": s2.get("costed_resources", summary.get("costed_resources")),
+                              "free_resources": s2.get("free_resources", summary.get("free_resources")),
+                              "finops_policies": s2.get("finops_policies", summary.get("finops_policies")),
+                              "failing_finops_policies": s2.get("failing_policies", summary.get("failing_finops_policies")),
+                              "tagging_policies": s2.get("tagging_policies", summary.get("tagging_policies")),
+                              "failing_tagging_policies": s2.get("failing_tagging_policies", summary.get("failing_tagging_policies")),
+                              "guardrails": s2.get("guardrails", summary.get("guardrails", 0)),
+                              "triggered_guardrails": s2.get("triggered_guardrails", summary.get("triggered_guardrails", 0)),
+                              "budgets": s2.get("budgets", summary.get("budgets", 0)),
+                              "warning_diagnostics": s2.get("warning_diagnostics", summary.get("warning_diagnostics", 0)),
+                              "total_potential_yearly_savings": s2.get("total_yearly_savings", summary.get("total_potential_yearly_savings")),
+                          }
+                  except Exception:
+                      pass
+              return raw, summary
+
+          def money(v):
+              try:
+                  return float(v)
+              except Exception:
+                  return 0.0
+
+          def fmt(v):
+              return f"${money(v):,.2f}"
+
+          base_raw, base_s = load_scan("base")
+          head_raw, head_s = load_scan("head")
+          currency = head_raw.get("currency") or "USD"
+
+          base_cost = money(base_s.get("total_monthly_cost"))
+          head_cost = money(head_s.get("total_monthly_cost"))
+          delta = head_cost - base_cost
+          pct = "n/a" if base_cost == 0 else f"{(delta / base_cost) * 100:.0f}%"
           if delta > 0:
               sign, emoji = "increase", "📈"
           elif delta < 0:
               sign, emoji = "decrease", "📉"
           else:
               sign, emoji = "no change", "➖"
+
+          resources = int(head_s.get("resources") or 0)
+          costed = int(head_s.get("costed_resources") or 0)
+          free = int(head_s.get("free_resources") or max(resources - costed, 0))
+          finops = int(head_s.get("finops_policies") or 0)
+          finops_fail = int(head_s.get("failing_finops_policies") or 0)
+          tagging = int(head_s.get("tagging_policies") or 0)
+          tagging_fail = int(head_s.get("failing_tagging_policies") or 0)
+          guardrails = int(head_s.get("guardrails") or head_s.get("triggered_guardrails") or 0)
+          budgets = int(head_s.get("budgets") or 0)
+          diags = int(head_s.get("warning_diagnostics") or 0)
+          savings = money(head_s.get("total_potential_yearly_savings"))
+
+          top = Path("/tmp/head-top.txt").read_text().strip() if Path("/tmp/head-top.txt").exists() else ""
+
+          # Unique FinOps policy names from scan JSON
+          finops_lines = []
+          for project in head_raw.get("projects") or []:
+              for fr in project.get("finops_results") or []:
+                  fails = fr.get("failing_resources") or []
+                  if not fails:
+                      continue
+                  name = fr.get("policy_name") or fr.get("policy_slug") or "policy"
+                  addrs = ", ".join(x.get("name", "?") for x in fails[:5])
+                  more = "" if len(fails) <= 5 else f" (+{len(fails)-5} more)"
+                  finops_lines.append(f"- ⚠️ **{name}** — `{addrs}`{more}")
+
+          finops_md = "\n".join(finops_lines[:12]) or "_No failing FinOps policies._"
+          if len(finops_lines) > 12:
+              finops_md += f"\n- _…and {len(finops_lines)-12} more_"
+
+          # Tagging summary
+          tag_fail_count = 0
+          for project in head_raw.get("projects") or []:
+              for tr in project.get("tagging_results") or []:
+                  tag_fail_count += len(tr.get("failing_resources") or [])
+          tag_md = f"⚠️ {tagging_fail} tagging policy failing across **{tag_fail_count}** resources" if tagging_fail else "🟢 Tagging policies passed"
+
+          box = f"""```
+          Scan Summary (this PR)
+          ----------------------
+          Resources:     {resources} ({costed} costed, {free} free)
+          Monthly cost:  {fmt(head_cost)}
+          FinOps:        {finops} policies ({finops_fail} failing)
+          Tagging:       {tagging} policies ({tagging_fail} failing)
+          Guardrails:    {guardrails}
+          Budgets:       {budgets}
+          Diagnostics:   {diags} warning(s)
+          Yearly savings potential: {fmt(savings)}
+          ```"""
+
+          top_md = f"```\n{top}\n```" if top else "_Top resources unavailable._"
+
           print(f"""### 💰 Infracost report
 
-          **Monthly cost will {sign} by ${abs(delta):,.2f} {emoji}**
+          **Monthly cost will {sign} by {fmt(abs(delta))} {emoji}**
 
           | | |
           |---|---|
-          | Baseline (base branch) | ${base:,.2f} |
-          | This PR | ${head:,.2f} |
-          | Change | ${delta:+,.2f} ({pct}) |
-          | Costed resources | {resources} |
-          | Failing FinOps policies | {head_fail} (was {base_fail}) |
+          | Baseline (base branch) | {fmt(base_cost)} |
+          | This PR | {fmt(head_cost)} |
+          | Change | {delta:+,.2f} ({pct}) |
           | Currency | {currency} |
 
-          <sub>Posted by Infracost CLI in GitHub Actions. Official Cloud scanner also ran on this PR.</sub>
+          {box}
+
+          <details open>
+          <summary><strong>Cost details (top resources)</strong></summary>
+
+          {top_md}
+
+          </details>
+
+          <details open>
+          <summary><strong>Failing FinOps policies</strong></summary>
+
+          {finops_md}
+
+          {tag_md}
+
+          </details>
+
+          <sub>Posted by Infracost CLI in GitHub Actions (mirrors local <code>infracost scan</code> / <code>inspect</code>).</sub>
           """)
           PY
 
           sed -i 's/^          //' /tmp/infracost-comment.md
           cat /tmp/infracost-comment.md
 
-          # Use the API (not `gh pr comment`) — workspace root is not a git checkout.
           EXISTING=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             --jq '.[] | select(.body | contains("Posted by Infracost CLI in GitHub Actions")) | .id' | head -1 || true)
           if [ -n "${EXISTING}" ]; then
